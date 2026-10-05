@@ -26,6 +26,8 @@ void send_html(int client_socket, const char *file_path)
     if (html_file == NULL)
     {
         perror("Erro ao abrir arquivo HTML");
+          const char *not_found_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+          send(client_socket, not_found_response, strlen(not_found_response), 0);
         return;
     }
 
@@ -48,7 +50,7 @@ void send_html(int client_socket, const char *file_path)
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
 
-    // // char *http_header = "HTTP/1.1 200 OK\r\nContent-Type: text/html \r\n\r\n";
+    
     send(client_socket, http_header, strlen(http_header), 0); // envia o cabeçalho HTTP para o cliente
     while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, html_file)) > 0)
     {
@@ -123,9 +125,11 @@ int main()
         printf("Método: %s\n", method);
         printf("Caminho: %s\n", path);
         printf("Protocolo: %s\n", protocol);
+        printf("\n\n");
 
         if (strcmp(method, "GET") == 0)
         {
+            //se a chamada for na raiz do serivdor envia o index.html
             if (strcmp(path, "/") == 0)
             {
                 send_html(client_socket, "index.html");
@@ -133,8 +137,7 @@ int main()
             else
             {
                 // Aqui da pra adicionar lógicas para outros caminhos
-                const char *not_found_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                send(client_socket, not_found_response, strlen(not_found_response), 0);
+              
             }
         }
         else
