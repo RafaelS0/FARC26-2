@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> //Unix standard functions
+#include <unistd.h>     //Unix standard functions
+#include <sys/time.h>   // timer para encerrar conexão
+#include <sys/socket.h> // socket
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -26,16 +28,16 @@ void send_html(int client_socket, const char *file_path)
     if (html_file == NULL)
     {
         perror("Erro ao abrir arquivo HTML");
-          const char *not_found_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-          send(client_socket, not_found_response, strlen(not_found_response), 0);
+        const char *not_found_response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+        send(client_socket, not_found_response, strlen(not_found_response), 0);
         return;
     }
 
-    fseek(html_file, 0, SEEK_END);
-    long file_size = ftell(html_file);
-    rewind(html_file);
+    fseek(html_file, 0, SEEK_END);     // move o ponteiro do arquivo para o final
+    long file_size = ftell(html_file); // obtém o tamanho do arquivo
+    rewind(html_file);                 // move o ponteiro do arquivo de volta para o início
 
-    char http_header[BUFFER_SIZE];
+    char http_header[BUFFER_SIZE]; // cria um buffer para armazenar o cabeçalho HTTP
 
     snprintf(
         http_header,
@@ -43,14 +45,13 @@ void send_html(int client_socket, const char *file_path)
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html\r\n"
         "Content-Length: %ld\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         file_size);
-
+    printf("Resposta enviada:\n%s\n", http_header);
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
 
-    
     send(client_socket, http_header, strlen(http_header), 0); // envia o cabeçalho HTTP para o cliente
     while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, html_file)) > 0)
     {
@@ -94,7 +95,7 @@ int main()
     }
     printf("Servidor ouvindo na porta %d ... \n", PORT);
 
-    while (1)
+    while (1) // loop para ficar ouvindo requisições de clientes
     {
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
 
@@ -104,49 +105,54 @@ int main()
             continue;
         }
         printf("CONEXÃO estabelecida com o cliente \n");
-        send_html(client_socket, "index.html");
 
-        // Recebe a requisição do cliente
-        char request[BUFFER_SIZE];
+        // se o cliente ficar 15 s sem enviar nada, o recv falha e o servidor fecha a conexão
+        struct timeval tv = {15, 0}; // 15 segundos, 0 microssegundos
+        setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        ssize_t bytes_received = recv(client_socket, request, sizeof(request) - 1, 0);
+        while (1)
+        { // loop / conexão persistente para receber requisições do cliente até que ele feche a conexão
 
-        if (bytes_received < 0)
-        {
-            perror("Erro ao receber a requisição do cliente");
-            continue;
-        }
+            // Recebe a requisição do cliente
+            char request[BUFFER_SIZE];
 
-        request[bytes_received] = '\0'; // Adiciona o terminador de string
-        printf("Requisição recebida do cliente:\n%s\n", request);
+            ssize_t bytes_received = recv(client_socket, request, sizeof(request) - 1, 0);
 
-        char method[16], path[256], protocol[16];
-        sscanf(request, "%s %s %s", method, path, protocol);
-        printf("Método: %s\n", method);
-        printf("Caminho: %s\n", path);
-        printf("Protocolo: %s\n", protocol);
-        printf("\n\n");
-
-        if (strcmp(method, "GET") == 0)
-        {
-            //se a chamada for na raiz do serivdor envia o index.html
-            if (strcmp(path, "/") == 0)
+            if (bytes_received <= 0)
             {
-                send_html(client_socket, "index.html");
+                perror("Erro ao receber a requisição do cliente");
+                break;
+            }
+
+            request[bytes_received] = '\0'; // Adiciona o terminador de string
+            printf("Requisição recebida do cliente:\n%s\n", request);
+
+            char method[16], path[256], protocol[16];
+            sscanf(request, "%s %s %s", method, path, protocol);
+            printf("Método: %s\n", method);
+            printf("Caminho: %s\n", path);
+            printf("Protocolo: %s\n", protocol);
+            printf("\n\n");
+
+            if (strcmp(method, "GET") == 0)
+            {
+                // se a chamada for na raiz do serivdor envia o index.html
+                if (strcmp(path, "/") == 0)
+                {
+                    send_html(client_socket, "index.html");
+                }
+                else
+                {
+                    send_html(client_socket, path + 1); // envia o arquivo solicitado pelo cliente (removendo a barra inicial do caminho)
+                }
             }
             else
             {
-                // Aqui da pra adicionar lógicas para outros caminhos
-              
+                // Método não suportado
+                const char *method_not_allowed_response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+                send(client_socket, method_not_allowed_response, strlen(method_not_allowed_response), 0);
             }
         }
-        else
-        {
-            // Método não suportado
-            const char *method_not_allowed_response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            send(client_socket, method_not_allowed_response, strlen(method_not_allowed_response), 0);
-        }
-
         close(client_socket);
         printf("Cliente desconectado \n");
     }
