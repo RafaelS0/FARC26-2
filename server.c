@@ -5,19 +5,12 @@
 #include <unistd.h>     //Unix standard functions
 #include <sys/time.h>   // timer para encerrar conexão
 #include <sys/socket.h> // socket
+#include <pthread.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
-// Aqui seria a lógica para tratar a conexão persistente, mas ainda não sei como implementar, então por enquanto o servidor fecha a conexão após enviar o arquivo HTML
-void *handle_client(void *arg)
-{
-    int client_socket = *(int *)arg;
-    free(arg);
 
-    close(client_socket);
-    return NULL;
-}
 
 // Função para enviar o arquivo HTML para o cliente
 void send_html(int client_socket, const char *file_path)
@@ -60,6 +53,74 @@ void send_html(int client_socket, const char *file_path)
     fclose(html_file);
 }
 
+
+
+//trata uma comunicação de forma persistente em uma thread própria
+void *handle_client(void *arg)
+{
+    int client_socket = *(int *)arg;
+    free(arg);
+
+    //se o cliente ficar 15s sem enviar nada, encerra a conexão
+    struct timeval tv = {15, 0};
+    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO,&tv, sizeof(tv));
+    
+    printf("Thread iniciada para o cliente %d\n", client_socket);//teste
+
+    while (1){
+        char request[BUFFER_SIZE];
+
+        ssize_t bytes_received = recv(client_socket, request, sizeof(request) - 1, 0);
+
+        if (bytes_received == 0) {
+            printf("Cliente fechou a conexão\n");
+            break;
+        }
+        
+        if (bytes_received < 0) {
+            perror("Erro ao receber a requisição");
+            break;
+        }
+
+        request[bytes_received] = '\0';
+
+        printf("Requisição recebida do cliente:\n%s\n", request);
+
+        char method[16], path[256], protocol[16];
+
+        sscanf(request, "%s %s %s", method, path, protocol);
+
+        printf("Método: %s\n", method);
+        printf("Caminho: %s\n", path);
+        printf("Protocolo: %s\n\n", protocol);
+
+        if (strcmp(method, "GET") == 0){
+            if (strcmp(path, "/") == 0){
+                send_html(client_socket, "index.html");
+            }
+            else{
+                send_html(client_socket, path + 1);
+            }
+        }
+        else{
+            const char *response =
+                "HTTP/1.1 405 Method Not Allowed\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: keep-alive\r\n"
+                "\r\n";
+
+            send(client_socket, response, strlen(response), 0);
+        }
+    }
+
+    close(client_socket);
+    printf("Cliente desconectado\n");
+
+    return NULL;
+}
+
+
+
 int main()
 {
 
@@ -71,6 +132,7 @@ int main()
     server_socket = socket(AF_INET, SOCK_STREAM, 0); // define o tipo de socket como TCP/IP
     if (server_socket == -1)
     {
+        perror("Erro ao criar socket");
         exit(EXIT_FAILURE);
     }
 
@@ -97,6 +159,8 @@ int main()
 
     while (1) // loop para ficar ouvindo requisições de clientes
     {
+        client_len = sizeof(client_addr);
+
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_socket < 0)
@@ -105,57 +169,32 @@ int main()
             continue;
         }
         printf("CONEXÃO estabelecida com o cliente \n");
+        
+        int *client_socket_ptr = malloc(sizeof(int));
 
-        // se o cliente ficar 15 s sem enviar nada, o recv falha e o servidor fecha a conexão
-        struct timeval tv = {15, 0}; // 15 segundos, 0 microssegundos
-        setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        while (1)
-        { // loop / conexão persistente para receber requisições do cliente até que ele feche a conexão
-
-            // Recebe a requisição do cliente
-            char request[BUFFER_SIZE];
-
-            ssize_t bytes_received = recv(client_socket, request, sizeof(request) - 1, 0);
-
-            if (bytes_received <= 0)
-            {
-                perror("Erro ao receber a requisição do cliente");
-                break;
-            }
-
-            request[bytes_received] = '\0'; // Adiciona o terminador de string
-            printf("Requisição recebida do cliente:\n%s\n", request);
-
-            char method[16], path[256], protocol[16];
-            sscanf(request, "%s %s %s", method, path, protocol);
-            printf("Método: %s\n", method);
-            printf("Caminho: %s\n", path);
-            printf("Protocolo: %s\n", protocol);
-            printf("\n\n");
-
-            if (strcmp(method, "GET") == 0)
-            {
-                // se a chamada for na raiz do serivdor envia o index.html
-                if (strcmp(path, "/") == 0)
-                {
-                    send_html(client_socket, "index.html");
-                }
-                else
-                {
-                    send_html(client_socket, path + 1); // envia o arquivo solicitado pelo cliente (removendo a barra inicial do caminho)
-                }
-            }
-            else
-            {
-                // Método não suportado
-                const char *method_not_allowed_response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
-                send(client_socket, method_not_allowed_response, strlen(method_not_allowed_response), 0);
-            }
+        
+        //exceção e criação de thread
+        if (client_socket_ptr == NULL){
+            perror("Erro ao alocar memória");
+            close(client_socket);
+            continue;
         }
-        close(client_socket);
-        printf("Cliente desconectado \n");
+        
+        *client_socket_ptr = client_socket;
+        
+        pthread_t thread;
+        
+        if (pthread_create(&thread, NULL, handle_client, client_socket_ptr) != 0){
+            perror("Erro ao criar thread");
+            close(client_socket);
+            free(client_socket_ptr);
+            continue;
+        }
+        
+        pthread_detach(thread);
     }
+
     close(server_socket);
     return 0;
 }
