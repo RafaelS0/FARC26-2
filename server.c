@@ -20,10 +20,11 @@ typedef struct {
     int port;
 } client_info;
 
+//Feito com auxilio de IA para acompanhar o tempo de inatividade dos clientes e listar os clientes conectados
 typedef struct {
-    int active;                   // slot em uso?
+    int active;                   
     int busy;                     // 1 = processando/enviando uma resposta
-    char ip[INET_ADDRSTRLEN];
+    char ip[INET_ADDRSTRLEN];     
     int port;
     int socket;
     struct timespec last_activity; // fim da última atividade
