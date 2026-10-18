@@ -3,12 +3,17 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-
+#include "qos.h"
 #include "server.h"
 #include "client_manager.h"
 
 int main(void)
 {
+    if (qos_init("qos.conf") != 0) {
+        fprintf(stderr, "Erro ao carregar configuração de QoS.\n");
+        exit(EXIT_FAILURE);
+    }
+
     int server_socket = start_server(PORT);
     if (server_socket < 0) {
         fprintf(stderr, "Erro ao iniciar o servidor.\n");

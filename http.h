@@ -12,7 +12,7 @@ typedef struct {
 } http_request;
 
 void parse_http_request(const char *raw_request, http_request *req);
-void send_file(int client_socket, const char *file_path);
+void send_file(int client_socket,const char *file_path,const char *client_ip);
 void send_http_error(int client_socket, int status_code, const char *status_text);
 
 #endif

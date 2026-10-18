@@ -118,12 +118,12 @@ void *handle_client(void *arg)
         {
             if (strcmp(req.path, "/") == 0)
             {
-                send_file(client_socket, "index.html");
+                send_file(client_socket, "index.html", info.ip);
             }
             else
             {
                 // Remove a barra inicial '/' do caminho recebido
-                send_file(client_socket, req.path + 1);
+                send_file(client_socket, req.path + 1, info.ip);
             }
         }
         else
