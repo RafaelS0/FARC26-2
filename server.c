@@ -11,6 +11,8 @@
 #include <sys/time.h>
 #include <arpa/inet.h>
 
+#define REQUEST_BUFFER_SIZE 8192
+
 int start_server(int port)
 {
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -61,8 +63,7 @@ void *input_thread(void *arg)
 void *handle_client(void *arg)
 {
     client_info info = *(client_info *)arg;
-    free(arg); // Libera a memória alocada na main
-    
+    free(arg);
 
     int client_socket = info.socket;
 
@@ -75,31 +76,55 @@ void *handle_client(void *arg)
 
     const char *motivo = "erro desconhecido";
 
+    char buffer[REQUEST_BUFFER_SIZE]; // bytes recebidos ainda não tratados
+    size_t buffered = 0;              // quantos bytes há no buffer
+    buffer[0] = '\0';
+
     while (1)
     {
-        char buffer[BUFFER_SIZE];
-        ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-
-        if (bytes_received == 0)
+        // 1. acumula bytes até o cabeçalho estar completo (termina em \r\n\r\n)
+        char *end;
+        while ((end = strstr(buffer, "\r\n\r\n")) == NULL)
         {
-            motivo = "cliente fechou a conexão";
-            break;
+            if (buffered >= sizeof(buffer) - 1)
+            {
+                const char *too_large =
+                    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                send(client_socket, too_large, strlen(too_large), MSG_NOSIGNAL);
+                motivo = "requisição maior que o buffer";
+                goto fim;
+            }
+
+            ssize_t bytes_received = recv(client_socket, buffer + buffered,
+                                          sizeof(buffer) - 1 - buffered, 0);
+
+            if (bytes_received == 0)
+            {
+                motivo = "cliente fechou a conexão";
+                goto fim;
+            }
+
+            if (bytes_received < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    motivo = "tempo limite de 15s sem requisição";
+                else
+                    motivo = strerror(errno);
+                goto fim;
+            }
+
+            buffered += bytes_received;
+            buffer[buffered] = '\0';
         }
 
-        if (bytes_received < 0)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                motivo = "tempo limite de 15s sem requisição";
-            }
-            else
-            {
-                motivo = strerror(errno);
-            }
-            break;
-        }
+        // 2. isola a primeira requisição (as seguintes ficam no buffer)
+        size_t req_len = (end - buffer) + 4; // inclui o \r\n\r\n
+        char saved = buffer[req_len];
+        buffer[req_len] = '\0';
 
-        buffer[bytes_received] = '\0';
         set_busy(slot, 1);
 
         printf("Requisição recebida de %s:%d:\n%s\n", info.ip, info.port, buffer);
@@ -117,26 +142,34 @@ void *handle_client(void *arg)
         if (strcmp(req.method, "GET") == 0)
         {
             if (strcmp(req.path, "/") == 0)
-            {
                 send_file(client_socket, "index.html", info.ip);
-            }
             else
-            {
-                // Remove a barra inicial '/' do caminho recebido
                 send_file(client_socket, req.path + 1, info.ip);
-            }
         }
         else
         {
             send_http_error(client_socket, 405, "Method Not Allowed");
         }
 
+        // 3. descarta só a requisição tratada e mantém o que sobrou
+        buffer[req_len] = saved;
+        memmove(buffer, buffer + req_len, buffered - req_len + 1); // +1 leva o '\0'
+        buffered -= req_len;
+
         set_busy(slot, 0);
+
+        // o cliente pediu para encerrar depois da resposta
+        if (strcasecmp(req.connection, "close") == 0)
+        {
+            motivo = "cliente pediu Connection: close";
+            goto fim;
+        }
     }
 
+fim:
+    unregister_client(slot);
     close(client_socket);
     printf("[-] Cliente desconectado: %s:%d (motivo: %s)\n", info.ip, info.port, motivo);
 
-    unregister_client(slot);
     return NULL;
 }

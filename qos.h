@@ -19,4 +19,11 @@ int qos_send_limited(
     const char *client_ip
 );
 
+int send_all_count(
+    int socket,
+    const void *data,
+    size_t length,
+    size_t *sent_total
+);
+
 #endif

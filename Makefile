@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pthread -O2
 TARGET = server
-OBJS = main.o server.o client_manager.o http.o
+OBJS = main.o server.o client_manager.o http.o qos.o
 
 # Declara alvos que não geram arquivos diretamente no disco
 .PHONY: all run clean

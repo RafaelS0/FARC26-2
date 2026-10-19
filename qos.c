@@ -252,7 +252,7 @@ static void sleep_until(struct timespec deadline){
 
 
 //envia todos os bytes, tratnado envios parciais
-static int send_all_count(int socket,const void *data,size_t length,size_t *sent_total){
+int send_all_count(int socket,const void *data,size_t length,size_t *sent_total){
     const char *bytes = data;
     *sent_total = 0;
 
