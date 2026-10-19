@@ -1,6 +1,7 @@
 #include "server.h"
 #include "client_manager.h"
 #include "http.h"
+#include "qos.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,15 +67,25 @@ void *handle_client(void *arg)
     free(arg);
 
     int client_socket = info.socket;
+    int admitted = 0;
+    int slot = -1;
+    const char *motivo = "erro desconhecido";
+
+    if (!qos_admit(info.ip))
+    {
+        send_http_error(client_socket, 429, "Too Many Requests");
+        motivo = "qos negou a conexão";
+        goto fim;
+    }
+    admitted = 1;
 
     // Configura timeout de inatividade para a leitura do socket
     struct timeval tv = {TIMEOUT_SEC, 0};
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    int slot = register_client(&info);
-    printf("[+] Cliente conectado: %s:%d (socket %d)\n", info.ip, info.port, client_socket);
+    slot = register_client(&info);
 
-    const char *motivo = "erro desconhecido";
+    printf("[+] Cliente conectado: %s:%d (socket %d)\n", info.ip, info.port, client_socket);
 
     char buffer[REQUEST_BUFFER_SIZE]; // bytes recebidos ainda não tratados
     size_t buffered = 0;              // quantos bytes há no buffer
@@ -167,9 +178,12 @@ void *handle_client(void *arg)
     }
 
 fim:
-    unregister_client(slot);
+    if (admitted)
+    {
+        qos_release(info.ip);
+        unregister_client(slot);
+    }
     close(client_socket);
     printf("[-] Cliente desconectado: %s:%d (motivo: %s)\n", info.ip, info.port, motivo);
-
     return NULL;
 }

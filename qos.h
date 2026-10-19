@@ -26,4 +26,13 @@ int send_all_count(
     size_t *sent_total
 );
 
+// define a vazão máxima do servidor (kbps); deve ser chamada antes de aceitar clientes
+void qos_set_capacity(unsigned int max_kbps);
+
+// 1 = cliente admitido, 0 = recusado (vazão máxima excedida)
+int qos_admit(const char *client_ip);
+
+// libera a conexão; chamar só se qos_admit retornou 1
+void qos_release(const char *client_ip);
+
 #endif

@@ -7,12 +7,30 @@
 #include "server.h"
 #include "client_manager.h"
 
-int main(void)
+int main(int argc, char *argv[])
 {
+    if (argc != 2) {
+        fprintf(stderr, "Uso: %s <vazao_maxima_kbps>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    char *endptr;
+    unsigned long capacity = strtoul(argv[1], &endptr, 10);
+
+    if (*endptr != '\0' || capacity == 0) {
+        fprintf(stderr, "Vazão máxima inválida: %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    }
+
     if (qos_init("qos.conf") != 0) {
         fprintf(stderr, "Erro ao carregar configuração de QoS.\n");
         exit(EXIT_FAILURE);
     }
+
+    qos_set_capacity((unsigned int)capacity);
+    printf("Vazão máxima do servidor: %lu kbps\n", capacity);
+
+    
 
     int server_socket = start_server(PORT);
     if (server_socket < 0) {
