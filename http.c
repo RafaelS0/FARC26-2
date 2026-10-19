@@ -7,6 +7,46 @@
 #include "qos.h"
 #include <errno.h>
 #include <strings.h>
+#include <pthread.h>
+#include <time.h>
+
+
+#define PROGRESS_INTERVAL_SECONDS 0.5
+/// FEITO COM AUXILIO DE INTELIGÊNCIA ARTIFICIAL 
+static pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static double elapsed_seconds(const struct timespec *start,
+                              const struct timespec *end)
+{
+    return (double)(end->tv_sec - start->tv_sec)
+         + (double)(end->tv_nsec - start->tv_nsec) / 1000000000.0;
+}
+
+static void print_transfer_progress(const char *file_path,
+                                    const char *client_ip,
+                                    size_t bytes_sent,
+                                    long file_size,
+                                    double elapsed,
+                                    int finished)
+{
+    double percentage = file_size > 0
+        ? (double)bytes_sent * 100.0 / (double)file_size
+        : 100.0;
+    double rate_kbps = elapsed > 0.0
+        ? (double)bytes_sent * 8.0 / 1000.0 / elapsed
+        : 0.0;
+
+    pthread_mutex_lock(&progress_mutex);
+    printf("[progresso] %s -> %s: %zu/%ld bytes (%.1f%%), "
+           "%.2f kbps, %.2f s%s\n",
+           file_path, client_ip, bytes_sent, file_size, percentage,
+           rate_kbps, elapsed,
+           finished ? " - concluido" : "");
+    fflush(stdout);
+    pthread_mutex_unlock(&progress_mutex);
+}
+/// FEITO COM AUXILIO DE INTELIGÊNCIA ARTIFICIAL
+
 
 static int is_html_file(const char *path){
     const char *ext = strrchr(path, '.');
@@ -164,9 +204,19 @@ void send_file(int client_socket,const char *file_path,const char *client_ip)
 
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
+    size_t bytes_sent = 0;
     int send_failed = 0;
+    struct timespec transfer_started = {0};
+    struct timespec last_progress = {0};
 
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    if (clock_gettime(CLOCK_MONOTONIC, &transfer_started) != 0) {
+        perror("Erro ao iniciar cronometro da transferencia");
+        send_failed = 1;
+    }
+    last_progress = transfer_started;
+
+    while (!send_failed &&
+           (bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
         int result;
 
         if (html) {
@@ -194,11 +244,53 @@ void send_file(int client_socket,const char *file_path,const char *client_ip)
             send_failed = 1;
             break;
         }
+
+        bytes_sent += bytes_read;
+
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            perror("Erro ao atualizar cronometro da transferencia");
+            send_failed = 1;
+            break;
+        }
+
+        double since_last_progress = elapsed_seconds(&last_progress, &now);
+        if (since_last_progress >= PROGRESS_INTERVAL_SECONDS ||
+            bytes_sent == (size_t)file_size) {
+            print_transfer_progress(file_path, client_ip, bytes_sent,
+                                    file_size,
+                                    elapsed_seconds(&transfer_started, &now),
+                                    bytes_sent == (size_t)file_size);
+            last_progress = now;
+        }
     }
 
     if (ferror(file)) {
         perror("Erro ao ler arquivo");
         send_failed = 1;
+    }
+
+    if (!send_failed && bytes_sent == 0) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            print_transfer_progress(file_path, client_ip, bytes_sent,
+                                    file_size,
+                                    elapsed_seconds(&transfer_started, &now),
+                                    1);
+        } else {
+            perror("Erro ao concluir cronometro da transferencia");
+            send_failed = 1;
+        }
+    } else if (send_failed && bytes_sent > 0) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            print_transfer_progress(file_path, client_ip, bytes_sent,
+                                    file_size,
+                                    elapsed_seconds(&transfer_started, &now),
+                                    0);
+        } else {
+            perror("Erro ao atualizar cronometro da transferencia");
+        }
     }
 
     fclose(file);

@@ -36,24 +36,30 @@ void rtt_register_html(const char *experiment_id,
         }
     }
 
+    int replacement_slot = 0;
     for (int i = 0; i < MAX_RTT_CLIENTS; i++) {
         if (!entries[i].active) {
-            snprintf(entries[i].experiment_id,
-                     sizeof(entries[i].experiment_id),
-                     "%s", experiment_id);
-
-            entries[i].html_timestamp = *timestamp;
-            entries[i].active = 1;
-
-            printf("[RTT] Experimento %s: HTML registrado.\n",
-                   experiment_id);
-
-            pthread_mutex_unlock(&rtt_mutex);
-            return;
+            replacement_slot = i;
+            break;
         }
+
+        if (entries[i].html_timestamp.tv_sec <
+                entries[replacement_slot].html_timestamp.tv_sec ||
+            (entries[i].html_timestamp.tv_sec ==
+                 entries[replacement_slot].html_timestamp.tv_sec &&
+             entries[i].html_timestamp.tv_nsec <
+                 entries[replacement_slot].html_timestamp.tv_nsec))
+            replacement_slot = i;
     }
 
-    fprintf(stderr, "[RTT] Limite de experimentos atingido.\n");
+    snprintf(entries[replacement_slot].experiment_id,
+             sizeof(entries[replacement_slot].experiment_id),
+             "%s", experiment_id);
+    entries[replacement_slot].html_timestamp = *timestamp;
+    entries[replacement_slot].active = 1;
+
+    printf("[RTT] Experimento %s: HTML registrado.\n",
+           experiment_id);
     pthread_mutex_unlock(&rtt_mutex);
 }
 
@@ -80,8 +86,6 @@ void rtt_register_object(const char *experiment_id,
 
             printf("[RTT] Experimento %s: intervalo HTML-objeto = %.3f ms\n",
                    experiment_id, elapsed_ms);
-
-            entries[i].active = 0;
 
             pthread_mutex_unlock(&rtt_mutex);
             return;
