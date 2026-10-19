@@ -2,6 +2,7 @@
 #include "client_manager.h"
 #include "http.h"
 #include "qos.h"
+#include "rtt_monitor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,8 +12,52 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
+#include <strings.h>
+#include <time.h>
 
 #define REQUEST_BUFFER_SIZE 8192
+
+static int path_has_extension(const char *path, const char *extension)
+{
+    const char *query = strchr(path, '?');
+    size_t path_length = query ? (size_t)(query - path) : strlen(path);
+    const char *dot = NULL;
+
+    for (size_t i = 0; i < path_length; i++)
+    {
+        if (path[i] == '.')
+            dot = path + i;
+        else if (path[i] == '/')
+            dot = NULL;
+    }
+
+    return dot != NULL &&
+           (size_t)((path + path_length) - dot) == strlen(extension) &&
+           strncasecmp(dot, extension, strlen(extension)) == 0;
+}
+
+static int is_html_request_path(const char *path)
+{
+    return strcmp(path, "/") == 0 ||
+           path_has_extension(path, ".html") ||
+           path_has_extension(path, ".htm");
+}
+
+static int is_image_request_path(const char *path)
+{
+    static const char *const extensions[] = {
+        ".apng", ".avif", ".bmp", ".gif", ".ico", ".jxl",
+        ".jpeg", ".jpg", ".png", ".svg", ".webp"
+    };
+
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++)
+    {
+        if (path_has_extension(path, extensions[i]))
+            return 1;
+    }
+
+    return 0;
+}
 
 int start_server(int port)
 {
@@ -131,6 +176,9 @@ void *handle_client(void *arg)
             buffer[buffered] = '\0';
         }
 
+
+
+
         // 2. isola a primeira requisição (as seguintes ficam no buffer)
         size_t req_len = (end - buffer) + 4; // inclui o \r\n\r\n
         char saved = buffer[req_len];
@@ -143,6 +191,9 @@ void *handle_client(void *arg)
         http_request req;
         parse_http_request(buffer, &req);
 
+        struct timespec request_received_at;
+        clock_gettime(CLOCK_MONOTONIC, &request_received_at);   
+
         printf("Dados extraídos da requisição:\n");
         printf("Método: %s\n", req.method);
         printf("Caminho: %s\n", req.path);
@@ -152,6 +203,19 @@ void *handle_client(void *arg)
 
         if (strcmp(req.method, "GET") == 0)
         {
+            if (is_html_request_path(req.path))
+            {
+                printf("[RTT] Requisição HTML recebida de %s.\n", info.ip);
+                printf("[RTT] Instante inicial: %ld s, %ld ns\n",
+                       (long)request_received_at.tv_sec,
+                       request_received_at.tv_nsec);
+                rtt_register_html(info.ip, &request_received_at);
+            }
+            else if (is_image_request_path(req.path))
+            {
+                rtt_register_object(info.ip, &request_received_at);
+            }
+
             if (strcmp(req.path, "/") == 0)
                 send_file(client_socket, "index.html", info.ip);
             else
