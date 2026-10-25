@@ -19,6 +19,7 @@ int register_client(const client_info *info)
             strcpy(clients[i].ip, info->ip);
             clients[i].port = info->port;
             clients[i].socket = info->socket;
+            memset(&clients[i].metrics, 0, sizeof(clients[i].metrics));
             clock_gettime(CLOCK_MONOTONIC, &clients[i].last_activity);
             slot = i;
             break;
@@ -39,6 +40,15 @@ void set_busy(int slot, int busy)
     pthread_mutex_unlock(&clients_mutex);
 }
 
+void client_publish_metrics(int slot, const client_metrics *metrics)
+{
+    if (slot < 0 || slot >= MAX_CLIENTS || metrics == NULL) return;
+
+    pthread_mutex_lock(&clients_mutex);
+    clients[slot].metrics = *metrics;
+    pthread_mutex_unlock(&clients_mutex);
+}
+
 void unregister_client(int slot)
 {
     if (slot < 0 || slot >= MAX_CLIENTS) return;
@@ -48,33 +58,39 @@ void unregister_client(int slot)
     pthread_mutex_unlock(&clients_mutex);
 }
 
-void list_clients(void)
+size_t client_snapshot(client_view *out, size_t max, size_t *total_active)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    int total = 0;
+
+    size_t copied = 0;
+    size_t total = 0;
 
     pthread_mutex_lock(&clients_mutex);
-    printf("\n===== Clientes conectados =====\n");
-    
+
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].active) continue;
         total++;
 
-        if (clients[i].busy) {
-            printf("%s:%d (socket %d) - atendendo requisição\n",
-                   clients[i].ip, clients[i].port, clients[i].socket);
-        } else {
-            double idle = (now.tv_sec - clients[i].last_activity.tv_sec)
-                        + (now.tv_nsec - clients[i].last_activity.tv_nsec) / 1e9;
-            double restante = TIMEOUT_SEC - idle;
-            if (restante < 0) restante = 0;
-            
-            printf("%s:%d (socket %d) - ocioso, encerra em %.0fs\n",
-                   clients[i].ip, clients[i].port, clients[i].socket, restante);
-        }
+        if (out == NULL || copied >= max) continue;
+
+        client_view *view = &out[copied++];
+        snprintf(view->ip, sizeof(view->ip), "%s", clients[i].ip);
+        view->port = clients[i].port;
+        view->busy = clients[i].busy;
+        view->metrics = clients[i].metrics;
+
+        double idle = (now.tv_sec - clients[i].last_activity.tv_sec)
+                    + (now.tv_nsec - clients[i].last_activity.tv_nsec) / 1e9;
+        double restante = TIMEOUT_SEC - idle;
+        view->idle_remaining_sec = restante < 0 ? 0 : restante;
     }
-    
+
     pthread_mutex_unlock(&clients_mutex);
-    printf("Total: %d\n===============================\n\n", total);
+
+    if (total_active != NULL) {
+        *total_active = total;
+    }
+
+    return copied;
 }

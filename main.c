@@ -6,20 +6,18 @@
 #include "qos.h"
 #include "server.h"
 #include "client_manager.h"
+#include "config.h"
+#include "admission.h"
+#include "monitor.h"
+#include "log.h"
+#include <errno.h>
+#include <string.h>
 
 int main(int argc, char *argv[])
 {
-    if (argc != 2) {
-        fprintf(stderr, "Uso: %s <vazao_maxima_kbps>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    char *endptr;
-    unsigned long capacity = strtoul(argv[1], &endptr, 10);
-
-    if (*endptr != '\0' || capacity == 0) {
-        fprintf(stderr, "Vazão máxima inválida: %s\n", argv[1]);
-        exit(EXIT_FAILURE);
+    int cfg = config_load_args(argc, argv);
+    if (cfg != 0) {
+        return cfg > 0 ? EXIT_SUCCESS : 2;
     }
 
     if (qos_init("qos.conf") != 0) {
@@ -27,10 +25,15 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    qos_set_capacity((unsigned int)capacity);
-    printf("Vazão máxima do servidor: %lu kbps\n", capacity);
-
-    
+    if (admission_init(config_get_max_capacity_kbps()) != 0) {
+        fprintf(stderr, "Erro ao iniciar o controle de admissão.\n");
+        exit(EXIT_FAILURE);
+    }
+    if (log_open(LOG_FILE_PATH) != 0) {
+        perror("Erro ao abrir arquivo de log");
+        exit(EXIT_FAILURE);
+    }
+    printf("Vazão máxima do servidor: %u kbps\n", config_get_max_capacity_kbps());
 
     int server_socket = start_server(PORT);
     if (server_socket < 0) {
@@ -40,10 +43,10 @@ int main(int argc, char *argv[])
 
     printf("Servidor ouvindo na porta %d ...\n", PORT);
 
-    pthread_t input_tid;
-    pthread_create(&input_tid, NULL, input_thread, NULL);
-    pthread_detach(input_tid);
-    printf("Pressione ENTER para listar os clientes conectados.\n");
+    if (monitor_start() != 0) {
+        fprintf(stderr, "Erro ao iniciar o monitoramento.\n");
+        exit(EXIT_FAILURE);
+    }
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -51,13 +54,13 @@ int main(int argc, char *argv[])
 
         int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
         if (client_socket < 0) {
-            perror("Falha ao aceitar conexão");
+            log_printf("Falha ao aceitar conexão: %s", strerror(errno));
             continue;
         }
 
         client_info *info = malloc(sizeof(client_info));
         if (!info) {
-            perror("Erro ao alocar memória");
+            log_printf("Erro ao alocar memória: %s", strerror(errno));
             close(client_socket);
             continue;
         }
@@ -68,7 +71,7 @@ int main(int argc, char *argv[])
 
         pthread_t thread;
         if (pthread_create(&thread, NULL, handle_client, info) != 0) {
-            perror("Erro ao criar thread");
+            log_printf("Erro ao criar thread: %s", strerror(errno));
             close(client_socket);
             free(info);
             continue;
