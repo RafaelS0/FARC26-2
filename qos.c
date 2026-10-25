@@ -11,19 +11,15 @@
 
 #define QOS_MAX_IPS 1024
 
-
 typedef struct {
     char ip[INET_ADDRSTRLEN];
     unsigned int rate_kbps;
     pthread_mutex_t tx_mutex;
     struct timespec next_allowed;
-    int active_conns;
-
 } qos_entry;
 
 static qos_entry entries[QOS_MAX_IPS];
 static size_t entry_count = 0;
-static unsigned int max_kbps, allocated_kbps; 
 
 static pthread_mutex_t table_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -34,9 +30,6 @@ static int valid_ipv4(const char *ip){
     return ip != NULL && inet_pton(AF_INET, ip, &address) == 1;
 }
 
-void qos_set_capacity(unsigned int kbps){
-    max_kbps = kbps;
-}
 
 //procura uma entrada. O chamador deve possuir table_mutex
 static qos_entry *find_entry_locked(const char *ip){
@@ -328,37 +321,4 @@ int qos_send_limited(int client_socket,const void *data,size_t length,const char
     pthread_mutex_unlock(&entry->tx_mutex);
 
     return result;
-}
-
-int qos_admit(const char *ip){
- 
-
-
-       qos_entry *e = get_entry(ip); 
-       if(!e) return 0;
-       int ok = 1;
-
-       pthread_mutex_lock(&table_mutex);
-
-       printf("[qos] admit %s: rate=%u alocado=%u max=%u conns=%d\n",
-       ip, e->rate_kbps, allocated_kbps, max_kbps, e->active_conns);
-       if (e->active_conns == 0) {
-          if (allocated_kbps + e->rate_kbps > max_kbps)
-              ok = 0;
-          else
-            allocated_kbps += e->rate_kbps;
-}
-        if(ok == 1) e->active_conns++;
-        pthread_mutex_unlock(&table_mutex);
-        return ok;
-}
-
-void qos_release(const char *ip){
-    qos_entry *e = get_entry(ip);
-    if (!e) return;
-
-    pthread_mutex_lock(&table_mutex);
-    if (e->active_conns > 0 && --e->active_conns == 0)
-        allocated_kbps -= e->rate_kbps;
-    pthread_mutex_unlock(&table_mutex);
 }

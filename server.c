@@ -1,8 +1,9 @@
 #include "server.h"
 #include "client_manager.h"
 #include "http.h"
-#include "qos.h"
-#include "rtt_monitor.h"
+#include "admission.h"
+#include "metrics.h"
+#include "log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,53 +12,8 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <arpa/inet.h>
-#include <strings.h>
 #include <time.h>
-
-#define REQUEST_BUFFER_SIZE 8192
-
-static int path_has_extension(const char *path, const char *extension)
-{
-    const char *query = strchr(path, '?');
-    size_t path_length = query ? (size_t)(query - path) : strlen(path);
-    const char *dot = NULL;
-
-    for (size_t i = 0; i < path_length; i++)
-    {
-        if (path[i] == '.')
-            dot = path + i;
-        else if (path[i] == '/')
-            dot = NULL;
-    }
-
-    return dot != NULL &&
-           (size_t)((path + path_length) - dot) == strlen(extension) &&
-           strncasecmp(dot, extension, strlen(extension)) == 0;
-}
-
-static int is_html_request_path(const char *path)
-{
-    return strcmp(path, "/") == 0 ||
-           path_has_extension(path, ".html") ||
-           path_has_extension(path, ".htm");
-}
-
-static int is_image_request_path(const char *path)
-{
-    static const char *const extensions[] = {
-        ".apng", ".avif", ".bmp", ".gif", ".ico", ".jxl",
-        ".jpeg", ".jpg", ".png", ".svg", ".webp"
-    };
-
-    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++)
-    {
-        if (path_has_extension(path, extensions[i]))
-            return 1;
-    }
-
-    return 0;
-}
+#include <arpa/inet.h>
 
 int start_server(int port)
 {
@@ -95,159 +51,143 @@ int start_server(int port)
     return server_socket;
 }
 
-void *input_thread(void *arg)
+#define REFUSE_RETRY_AFTER_SEC 5
+#define REFUSE_DRAIN_TIMEOUT_SEC 1
+
+static void refuse_client(const client_info *info, admission_result reason)
 {
-    (void)arg;
-    char line[64];
-    while (fgets(line, sizeof(line), stdin))
-    {
-        list_clients();
-    }
-    return NULL;
+    struct timeval tv = {REFUSE_DRAIN_TIMEOUT_SEC, 0};
+    setsockopt(info->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    char discard[BUFFER_SIZE];
+    recv(info->socket, discard, sizeof(discard), 0);
+
+    send_http_service_unavailable(info->socket, REFUSE_RETRY_AFTER_SEC);
+    shutdown(info->socket, SHUT_WR);
+    close(info->socket);
+
+    log_printf("Cliente recusado: %s:%d (%s)", info->ip, info->port, admission_result_text(reason));
+}
+
+static void log_transfer(const client_info *info, const char *path, const transfer_record *record,
+                         const transfer_metrics *tm, const client_metrics *metrics)
+{
+    char bandwidth[48], delay[48], rtt[48];
+
+    metrics_format(bandwidth, sizeof(bandwidth), tm->has_bandwidth, tm->bandwidth_kbps, 3, "kbps");
+    metrics_format(delay, sizeof(delay), tm->has_delay, tm->delay_ms, 3, "ms");
+    metrics_format(rtt, sizeof(rtt), metrics->has_rtt, metrics->rtt_ms, 3, "ms");
+
+    log_printf("[metricas] %s:%d %s %s bytes=%zu/%zu envio=%.3f ms banda=%s rtt=%s atraso=%s",
+               info->ip, info->port, path, metrics_status_text(record->status),
+               record->bytes_sent, record->object_size, tm->send_ms, bandwidth, rtt, delay);
 }
 
 void *handle_client(void *arg)
 {
     client_info info = *(client_info *)arg;
-    free(arg);
+    free(arg); // Libera a memória alocada na main
 
     int client_socket = info.socket;
-    int admitted = 0;
-    int slot = -1;
-    const char *motivo = "erro desconhecido";
 
-    if (!qos_admit(info.ip))
+    unsigned int reserved_kbps = 0;
+    admission_result admitted = admission_try_admit(info.ip, &reserved_kbps);
+
+    if (admitted != ADMISSION_OK)
     {
-        send_http_error(client_socket, 429, "Too Many Requests");
-        motivo = "qos negou a conexão";
-        goto fim;
+        refuse_client(&info, admitted);
+        return NULL;
     }
-    admitted = 1;
 
     // Configura timeout de inatividade para a leitura do socket
     struct timeval tv = {TIMEOUT_SEC, 0};
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    slot = register_client(&info);
+    int slot = register_client(&info);
+    log_printf("Cliente conectado: %s:%d (socket %d, %u kbps reservados para o IP)",
+               info.ip, info.port, client_socket, reserved_kbps);
 
-    printf("[+] Cliente conectado: %s:%d (socket %d)\n", info.ip, info.port, client_socket);
+    client_metrics metrics;
+    memset(&metrics, 0, sizeof(metrics));
+    metrics_update_rtt(&metrics, client_socket);
+    client_publish_metrics(slot, &metrics);
 
-    char buffer[REQUEST_BUFFER_SIZE]; // bytes recebidos ainda não tratados
-    size_t buffered = 0;              // quantos bytes há no buffer
-    buffer[0] = '\0';
+    const char *motivo = "erro desconhecido";
 
     while (1)
     {
-        // 1. acumula bytes até o cabeçalho estar completo (termina em \r\n\r\n)
-        char *end;
-        while ((end = strstr(buffer, "\r\n\r\n")) == NULL)
+        char buffer[BUFFER_SIZE];
+        ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytes_received == 0)
         {
-            if (buffered >= sizeof(buffer) - 1)
-            {
-                const char *too_large =
-                    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
-                    "Content-Length: 0\r\n"
-                    "Connection: close\r\n"
-                    "\r\n";
-                send(client_socket, too_large, strlen(too_large), MSG_NOSIGNAL);
-                motivo = "requisição maior que o buffer";
-                goto fim;
-            }
-
-            ssize_t bytes_received = recv(client_socket, buffer + buffered,
-                                          sizeof(buffer) - 1 - buffered, 0);
-
-            if (bytes_received == 0)
-            {
-                motivo = "cliente fechou a conexão";
-                goto fim;
-            }
-
-            if (bytes_received < 0)
-            {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    motivo = "tempo limite de 15s sem requisição";
-                else
-                    motivo = strerror(errno);
-                goto fim;
-            }
-
-            buffered += bytes_received;
-            buffer[buffered] = '\0';
+            motivo = "cliente fechou a conexão";
+            break;
         }
 
+        if (bytes_received < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                motivo = "tempo limite de 15s sem requisição";
+            }
+            else
+            {
+                motivo = strerror(errno);
+            }
+            break;
+        }
 
+        transfer_record record;
+        memset(&record, 0, sizeof(record));
+        clock_gettime(CLOCK_MONOTONIC, &record.request_time);
 
-
-        // 2. isola a primeira requisição (as seguintes ficam no buffer)
-        size_t req_len = (end - buffer) + 4; // inclui o \r\n\r\n
-        char saved = buffer[req_len];
-        buffer[req_len] = '\0';
-
+        buffer[bytes_received] = '\0';
         set_busy(slot, 1);
 
-        printf("Requisição recebida de %s:%d:\n%s\n", info.ip, info.port, buffer);
+        log_printf("Requisição recebida de %s:%d:\n%s", info.ip, info.port, buffer);
 
         http_request req;
         parse_http_request(buffer, &req);
 
-        struct timespec request_received_at;
-        clock_gettime(CLOCK_MONOTONIC, &request_received_at);   
-
-        printf("Dados extraídos da requisição:\n");
-        printf("Método: %s\n", req.method);
-        printf("Caminho: %s\n", req.path);
-        printf("Protocolo: %s\n", req.protocol);
-        printf("Connection: %s\n", req.connection);
-        printf("Accept: %s\n\n", req.accept);
+        log_printf("Dados extraídos da requisição de %s:%d:\n"
+                   "  Método: %s\n  Caminho: %s\n  Protocolo: %s\n  Connection: %s\n  Accept: %s",
+                   info.ip, info.port, req.method, req.path, req.protocol, req.connection, req.accept);
 
         if (strcmp(req.method, "GET") == 0)
         {
-            if (is_html_request_path(req.path))
-            {
-                printf("[RTT] Requisição HTML recebida de %s.\n", info.ip);
-                printf("[RTT] Instante inicial: %ld s, %ld ns\n",
-                       (long)request_received_at.tv_sec,
-                       request_received_at.tv_nsec);
-                rtt_register_html(info.ip, &request_received_at);
-            }
-            else if (is_image_request_path(req.path))
-            {
-                rtt_register_object(info.ip, &request_received_at);
-            }
-
             if (strcmp(req.path, "/") == 0)
-                send_file(client_socket, "index.html", info.ip);
+            {
+                send_file(client_socket, "index.html", info.ip, &record);
+            }
             else
-                send_file(client_socket, req.path + 1, info.ip);
+            {
+                // Remove a barra inicial '/' do caminho recebido
+                send_file(client_socket, req.path + 1, info.ip, &record);
+            }
         }
         else
         {
             send_http_error(client_socket, 405, "Method Not Allowed");
         }
 
-        // 3. descarta só a requisição tratada e mantém o que sobrou
-        buffer[req_len] = saved;
-        memmove(buffer, buffer + req_len, buffered - req_len + 1); // +1 leva o '\0'
-        buffered -= req_len;
+        if (record.status != TRANSFER_NONE)
+        {
+            transfer_metrics tm;
+
+            metrics_update_rtt(&metrics, client_socket);
+            metrics_apply_transfer(&metrics, &record, &tm);
+            client_publish_metrics(slot, &metrics);
+            log_transfer(&info, req.path, &record, &tm, &metrics);
+        }
 
         set_busy(slot, 0);
-
-        // o cliente pediu para encerrar depois da resposta
-        if (strcasecmp(req.connection, "close") == 0)
-        {
-            motivo = "cliente pediu Connection: close";
-            goto fim;
-        }
     }
 
-fim:
-    if (admitted)
-    {
-        qos_release(info.ip);
-        unregister_client(slot);
-    }
     close(client_socket);
-    printf("[-] Cliente desconectado: %s:%d (motivo: %s)\n", info.ip, info.port, motivo);
+    log_printf("Cliente desconectado: %s:%d (motivo: %s)", info.ip, info.port, motivo);
+
+    admission_release(info.ip);
+    unregister_client(slot);
     return NULL;
 }
